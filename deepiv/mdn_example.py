@@ -1,16 +1,18 @@
 #file to test out mdn functions
 import math
+import os
 import numpy as np 
 import pandas as pd
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import mdn #my created library
-
-gitdir = '/home/luis/CausalML-project/'
+reload(mdn)
+gitdir = '/home/luis/deepiv/'
+gitdir = os.getcwd()
 np.random.seed(1923)
 
 
-datadir = '/home/luis/CausalML-project/Data/'
+datadir = gitdir + '/../Data/'
 
 settlers = pd.read_csv(datadir+'colonial_origins_data_missimp.csv')
 #remove those missing either outcome, endog institution measure, or exog instrument
@@ -52,9 +54,11 @@ for v in range(covars.shape[1]):
 
 
 covars=np.delete(covars,collin_vars,axis=1)
-[[W_in_final, B_in_final, W_out_final,B_out_final],[mixprobs,mixmeans,mixsds]] = mdn.fit_MDN(p,covars,learning_rate=0.01,num_nodes=15)
-#mean_LL = mdn.cv_MDN(p,covars)
 
+[weights,[mixprobs,mixmeans,mixsds]] = mdn.fit_MDN(p,covars,learning_rate=0.01,deeplayer_nodes = [15,15],num_batches=10,num_epochs=100)
+#mean_LL = mdn.cv_MDN(p,covars)
+for w in weights:
+    print w[0].shape,w[1].shape
 #graph those with nonmissing entries for both instrument and  policy variable
 #nomiss_z = np.array(settlers['mi_logem4']==0)
 #mdn.plot_mdn_sim(p[nomiss_z],z[nomiss_z,0],covars[nomiss_z,:], \

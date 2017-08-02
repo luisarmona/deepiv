@@ -3,6 +3,7 @@
 #http://blog.otoro.net/2015/11/24/mixture-density-networks-with-tensorflow/
 import math
 import numpy as np 
+import sys
 import pandas as pd
 import tensorflow as tf
 import matplotlib.pyplot as plt
@@ -43,20 +44,18 @@ def tf_mixlhood(probs,means,sds,y):
 
 
 #fit a MDN and return the NN parameters of interest (plus the estimated dist params)
-def fit_MDN(p,covars,num_components=3,num_nodes=10,learning_rate=0.001,seed=None,num_batches=10,plot_loss=True):
+def fit_MDN(p,covars,num_components=3,deeplayer_nodes = [10],learning_rate=0.001,seed=None,num_batches=10,num_epochs=10,plot_loss=True):
     np.random.seed(seed)
     if seed==None:
         seed=9 #for TF calls
     num_inputs = covars.shape[1] #the number of input features
     num_output = num_components*3
     num_obs = p.shape[0]
+    num_inter_layers = len(deeplayer_nodes)
     #initialize weights and biases for input->hidden layer
-    W_input = tf.Variable(tf.random_uniform(shape=[num_inputs,num_nodes],minval=-.1,maxval=.1,dtype=tf.float32,seed=seed))
-    b_input = tf.Variable(tf.random_uniform(shape=[1,num_nodes],minval=-.1,maxval=.1,dtype=tf.float32,seed=seed))
+    #W_input = tf.Variable(tf.random_uniform(shape=[num_inputs,num_nodes],minval=-.1,maxval=.1,dtype=tf.float32,seed=seed))
+    #b_input = tf.Variable(tf.random_uniform(shape=[1,num_nodes],minval=-.1,maxval=.1,dtype=tf.float32,seed=seed))
 
-    #initialize weights and biases for hidden->output layer
-    W_output = tf.Variable(tf.random_uniform(shape=[num_nodes,num_output],minval=-.1,maxval=.1,dtype=tf.float32,seed=seed))
-    b_output = tf.Variable(tf.random_uniform(shape=[1,num_output],minval=-.1,maxval=.1,dtype=tf.float32,seed=seed))
 
     #instantiate data vars
     inputs = tf.placeholder(dtype=tf.float32, shape=[None,num_inputs], name="inputs")
@@ -64,19 +63,36 @@ def fit_MDN(p,covars,num_components=3,num_nodes=10,learning_rate=0.001,seed=None
     #define the function for the hidden layer
     #use canonical tanh function for intermed, simple linear combo for final layer
     #(note it will be further processed)
-    intermed_layer = tf.nn.tanh(tf.matmul(inputs, W_input) + b_input)
-    output_layer = tf.matmul(intermed_layer,W_output) + b_output
+
+    deep_layers = []
+    layer_weights = []
+    prev_dim = num_inputs
+    prev_layer = inputs
+    for l in deeplayer_nodes:
+        #initialize weights and biases for input->hidden layer
+        W_layer = tf.Variable(tf.random_uniform(shape=[prev_dim,l],minval=-.1,maxval=.1,dtype=tf.float32,seed=seed))
+        b_layer = tf.Variable(tf.random_uniform(shape=[1,l],minval=-.1,maxval=.1,dtype=tf.float32,seed=seed))
+        inter_layer = tf.nn.tanh(tf.matmul(prev_layer, W_layer) + b_layer)
+        deep_layers.append(inter_layer)
+        layer_weights.append([W_layer,b_layer])
+        prev_dim = l
+        prev_layer = inter_layer
+
+    W_output = tf.Variable(tf.random_uniform(shape=[prev_dim,num_output],minval=-.1,maxval=.1,dtype=tf.float32,seed=seed))
+    b_output = tf.Variable(tf.random_uniform(shape=[1,num_output],minval=-.1,maxval=.1,dtype=tf.float32,seed=seed))
+    #intermed_layer = tf.nn.tanh(tf.matmul(inputs, W_input) + b_input)
+    output_layer = tf.matmul(prev_layer,W_output) + b_output
     #transform the final layer into probabilities, means, and variances
     mixprobs,mixmeans,mixsds=get_params(output_layer,num_components)
     #define the loss function- here the log likelihood of the mixture given parameters
 
     #now try to fit the NN against the Loss fcn
     loss = tf_mixlhood(mixprobs, mixmeans, mixsds, endog)
-    #trainer = tf.train.AdamOptimizer().minimize(loss)
-    trainer = tf.train.GradientDescentOptimizer(learning_rate=learning_rate).minimize(loss)
+    trainer = tf.train.AdamOptimizer().minimize(loss)
+    #trainer = tf.train.GradientDescentOptimizer(learning_rate=learning_rate).minimize(loss)
     s = tf.InteractiveSession()
     s.run(tf.global_variables_initializer())
-
+    print 
     print "training..."
     num_iters = 10000 #the number of gradient descents
     validation_losses=[]
@@ -89,45 +105,55 @@ def fit_MDN(p,covars,num_components=3,num_nodes=10,learning_rate=0.001,seed=None
     covars_validation = covars[validation_indices,:]
     p_train = p[train_indices]
     covars_train = covars[train_indices,:]
+    #print num_train_obs
     if num_batches=='all':
         num_batches=num_train_obs
-    for i in range(num_iters):
-        if i%100==0:
-            print i
-        if i%num_batches==0:
-            #redo the batch order
-            batchrank= np.argsort(np.random.uniform(size=num_train_obs))
-        #assign the batch obs
-        batch = (batchrank >= (i%num_batches)*num_train_obs/num_batches) & (batchrank <((i%num_batches)+1)*num_train_obs/num_batches)
-        #SGD
-        s.run(trainer,feed_dict={inputs: covars_train[batch,:].astype(np.float32), endog: p_train[batch,:].astype(np.float32)})
-        #s.run(trainer,feed_dict={inputs: covars_train.astype(np.float32), endog: p_train.astype(np.float32)})
-        #losses.append(s.run(loss,feed_dict={inputs: covars_train.astype(np.float32), endog: p_train.astype(np.float32)}))
-        if i%10==0:
-            validation_losses.append(s.run(loss,feed_dict={inputs: covars_validation.astype(np.float32), endog: p_validation.astype(np.float32)}))
-            if len(validation_losses) > 5:
-                #if np.mean(validation_losses[(len(validation_losses)-6):(len(validation_losses)-2)])< validation_losses[len(validation_losses)-1]:
-                if np.mean(validation_losses[len(validation_losses)-2])< validation_losses[len(validation_losses)-1]:
-                    print "Exiting at iteration " + str(i) + " due to increase in validation error." 
-                    break
+    for j in range(num_epochs):
+        batchrank= np.argsort(np.random.uniform(size=num_train_obs))
+        sys.stdout.write("\rCompleted Epoch: {e}/{eb}".format(e=j,eb=num_epochs))
+        sys.stdout.flush()
+        #print "\rCompleted Epoch: {e}/{eb}".format(e=j,eb=num_epochs),
+        for i in range(num_batches):
+            #assign the batch obs
+            batch = (batchrank >= i*num_train_obs/num_batches) & (batchrank <(i+1)*num_train_obs/num_batches)
+            #SGD
+            #print sum(batch)
+            s.run(trainer,feed_dict={inputs: covars_train[batch,:].astype(np.float32), endog: p_train[batch,:].astype(np.float32)})
+            #s.run(trainer,feed_dict={inputs: covars_train.astype(np.float32), endog: p_train.astype(np.float32)})
+            #losses.append(s.run(loss,feed_dict={inputs: covars_train.astype(np.float32), endog: p_train.astype(np.float32)}))
+
+        validation_losses.append(s.run(loss,feed_dict={inputs: covars_validation.astype(np.float32), endog: p_validation.astype(np.float32)}))
+        if len(validation_losses) >= 2:
+            #if np.mean(validation_losses[(len(validation_losses)-6):(len(validation_losses)-2)])< validation_losses[len(validation_losses)-1]:
+            if validation_losses[len(validation_losses)-2]< validation_losses[len(validation_losses)-1]:
+                print "\nExiting at epoch " + str(j) + " due to increase in validation error." 
+                break
+    if j==num_epochs-1:
+        print "\nCompleted {} Epochs".format(num_epochs)
     if plot_loss:
         print validation_losses
         plt.plot(range(len(validation_losses)),validation_losses)
         plt.savefig('opt_loss.pdf')
         plt.show()
     #having trained the NN, recover parameters, and return them
-    W_in_final = s.run(W_input)
-    B_in_final = s.run(b_input)
-    W_out_final = s.run(W_output)
-    B_out_final = s.run(b_output)
+    final_weights=[]
+    for l in layer_weights:
+        #W_out_final = s.run(l[0])
+        #B_out_final = s.run(l[1])
+        final_weights.append([s.run(l[0]),s.run(l[1])])
+    final_weights.append([s.run(W_output),s.run(b_output)])
+    #W_in_final = s.run(W_input)
+    #B_in_final = s.run(b_input)
+    #W_out_final = s.run(W_output)
+    #B_out_final = s.run(b_output)
     mixprobs,mixmeans,mixsds=s.run(get_params(output_layer,num_components),feed_dict={inputs:covars.astype(np.float32)})
     s.close()
-    return [[W_in_final, B_in_final, W_out_final,B_out_final],[mixprobs,mixmeans,mixsds]]
+    return [final_weights,[mixprobs,mixmeans,mixsds]]
 
 ##################################################################
 #d k-fold CV to get an average LL on test data from the training
 def cv_MDN(p,covars, \
-    num_components=3,num_nodes=10,learning_rate=0.001,folds=5,seed=None,num_batches=10):
+    num_components=3,num_nodes=10,learning_rate=0.001,folds=5,seed=None,num_batches=10,num_epochs=10):
     if seed != None:
         np.random.seed(seed)
     else:
@@ -180,29 +206,32 @@ def cv_MDN(p,covars, \
         #transform the final layer into probabilities, means, and variances
         mixprobs,mixmeans,mixsds=get_params(output_layer,num_components)
         loss = tf_mixlhood(mixprobs, mixmeans, mixsds, endog)
-        trainer = tf.train.GradientDescentOptimizer(learning_rate=learning_rate).minimize(loss)
+        #trainer = tf.train.GradientDescent.Optimizer(learning_rate=learning_rate).minimize(loss)
+        trainer=tf.train.AdamOptimizer().minimize(loss)
         s = tf.InteractiveSession()
         s.run(tf.global_variables_initializer())
         print "training..."
-        num_iters = 10000 #the number of gradient descents
+        num_iters = num_epochs*num_batches #the number of gradient descents
         validation_losses=[]
         if num_batches=='all':
             num_batches=num_train_obs
-        for i in range(num_iters):
-            if i%num_batches==0:
-                #redo the batch order
-                batchrank= np.argsort(np.random.uniform(size=num_train_obs))
+        for ep in range(num_epochs):
+            batchrank= np.argsort(np.random.uniform(size=num_train_obs))
             #assign the batch obs
-            batch = (batchrank >= (i%num_batches)*num_train_obs/num_batches) & (batchrank <((i%num_batches)+1)*num_train_obs/num_batches)
-            #SGD
-            s.run(trainer,feed_dict={inputs: covars_train[batch,:].astype(np.float32), endog: p_train[batch,:].astype(np.float32)})
-            if i%10==0:
-                validation_losses.append(s.run(loss,feed_dict={inputs: covars_validation.astype(np.float32), endog: p_validation.astype(np.float32)}))
-            if len(validation_losses) > 5:
-                if np.mean(validation_losses[(len(validation_losses)-6):(len(validation_losses)-2)])< validation_losses[len(validation_losses)-1]:
-                    #if np.mean(validation_losses[len(validation_losses)-2])< validation_losses[len(validation_losses)-1]:
-                    print "Exiting at iteration " + str(i) + " due to increase in validation error." 
-                    break
+            for i in range(num_batches):
+                batch = (batchrank >= (i*num_train_obs/num_batches)) & (batchrank < ((i+1)*num_train_obs/num_batches))
+                print sum(batch)
+                #SGD
+                s.run(trainer,feed_dict={inputs: covars_train[batch,:].astype(np.float32), endog: p_train[batch,:].astype(np.float32)})
+                if i%num_batches==num_batches-1:
+                    validation_losses.append(s.run(loss,feed_dict={inputs: covars_validation.astype(np.float32), endog: p_validation.astype(np.float32)}))
+                    if len(validation_losses) >= 2:
+                        if validation_losses[len(validation_losses)-2] < validation_losses[len(validation_losses)-1]:
+                            #if np.mean(validation_losses[len(validation_losses)-2])< validation_losses[len(validation_losses)-1]:
+                            print "Exiting at epoch " + str(ep) + " due to increase in validation error." 
+                            break
+        if ep==num_epochs-1:
+            print "Completed all {} epochs".fmt(num_epochs) 
         fold_ll = s.run(loss,feed_dict={inputs: covars_test.astype(np.float32), endog: p_test.astype(np.float32)})
         print fold_ll
         test_LL.append(fold_ll)
