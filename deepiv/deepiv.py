@@ -259,101 +259,154 @@ def ind_secondstage_loss_gradient_discrete(outcome,features2, P,p_range,
 #if this must be changed, additional arg is available (p_index denotes col to train)
 #pi,mu,sigma: the rows of each individual's 1st stage distribution of the endogenous variable (expressed as mix of normals)
 #num_nodes: the number of nodes in the hidden layer
-def train_second_stage_cont(y,features_second,pi,mu,sigma,num_nodes,p_mean,p_sd,seed=None,p_index=0,learning_rate=0.001):
+def train_second_stage_cont(y,features,pi,mu,sigma,deeplayer_nodes=[10],
+                            p_mean=0.,p_sd=1.,seed=None,
+                            p_index=0,learning_rate=0.001):
     if seed!=None:
         np.random.seed(seed)  
     else:
         seed=9 #for the tf calls     
 
-    num_inputs = features_second.shape[1] #the number of input features
+    num_inputs = features.shape[1] #the number of input features
     num_output = 1 # output layer (currently just one since outcome is one variable)
     num_obs = y.shape[0]
 
 
-    #initialize weights and biases for input->hidden layer
-    W_input = tf.Variable(tf.random_uniform(shape=[num_inputs,num_nodes],minval=-.1,maxval=.1,dtype=tf.float32,seed=seed),name='W_in')
-    b_input = tf.Variable(tf.random_uniform(shape=[1,num_nodes],minval=-.1,maxval=.1,dtype=tf.float32,seed=seed),name='B_in')
-    #initialize weights and biases for hidden->output layer
-    W_output = tf.Variable(tf.random_uniform(shape=[num_nodes,num_output],minval=-.1,maxval=.1,dtype=tf.float32,seed=seed),name='W_out')
-    b_output = tf.Variable(tf.random_uniform(shape=[1,num_output],minval=-.1,maxval=.1,dtype=tf.float32,seed=seed),name='B_out')
     #instantiate data vars
     inputs = tf.placeholder(dtype=tf.float32, shape=[None,num_inputs], name="inputs")
     outcome = tf.placeholder(dtype=tf.float32, shape=[None,1], name="outcome")
     #define the function for the hidden layer
     #use canonical tanh function for intermed, simple linear combo for final layer
-    hidden_layer = tf.nn.tanh(tf.matmul(inputs, W_input) + b_input)
-    outcome_layer = tf.matmul(hidden_layer,W_output) + b_output
+    #(note it will be further processed)
+
+    deep_layers = []
+    layer_weights = []
+    prev_dim = num_inputs
+    prev_layer = inputs
+    for i,l in enumerate(deeplayer_nodes):
+        #initialize weights and biases for input->hidden layer
+        W_layer = tf.Variable(tf.random_uniform(shape=[prev_dim,l],
+                minval=-.1,maxval=.1,dtype=tf.float32,seed=seed),
+                name="weights_{}".format(i))
+        b_layer = tf.Variable(tf.random_uniform(shape=[1,l],
+                minval=-.1,maxval=.1,dtype=tf.float32,seed=seed),
+                name="bias_{}".format(i))
+        inter_layer = tf.nn.tanh(tf.matmul(prev_layer, W_layer) + b_layer)
+        deep_layers.append(inter_layer)
+        layer_weights.append(W_layer)
+        layer_weights.append(b_layer)
+        prev_dim = l
+        prev_layer = inter_layer
+
+    W_output = tf.Variable(tf.random_uniform(shape=[prev_dim,num_output],
+                            minval=-.1,maxval=.1,dtype=tf.float32,seed=seed),
+                            name='weights_output')
+    b_output = tf.Variable(tf.random_uniform(shape=[1,num_output],
+                            minval=-.1,maxval=.1,dtype=tf.float32,seed=seed),
+                            name='bias_output')
+    #intermed_layer = tf.nn.tanh(tf.matmul(inputs, W_input) + b_input)
+    outcome_layer = tf.matmul(prev_layer,W_output) + b_output
+    layer_weights.append(W_output)
+    layer_weights.append(b_output)
+
     #the gradients of the output layer w.r.t. network parameters
-    nn_gradients = tf.gradients(outcome_layer, [W_input, b_input,W_output,b_output]) #the gradients of the DNN w.r.t. parameters
+    #delisted_weights = 
+    nn_gradients = tf.gradients(outcome_layer,layer_weights) #the gradients of the DNN w.r.t. parameters
+    print 
     #placeholders for gradients I pass from numpy
-    g_W_in = tf.placeholder(dtype=tf.float32, shape=W_input.get_shape(), name="g_W_in")
-    g_b_in = tf.placeholder(dtype=tf.float32, shape=b_input.get_shape(), name="g_b_in")
-    g_W_out = tf.placeholder(dtype=tf.float32, shape=W_output.get_shape(), name="g_W_out")
-    g_b_out = tf.placeholder(dtype=tf.float32, shape=b_output.get_shape(), name="g_b_out")
+    gradients=[]
+    for i,w in enumerate(layer_weights):
+        cutoffname = w.name[0:w.name.index(':')]
+        print cutoffname
+        g_tensor = tf.placeholder(dtype=tf.float32, shape=w.get_shape(), name="g_{}".format(cutoffname))
+        gradients.append(g_tensor)
+
+    #g_W_out = tf.placeholder(dtype=tf.float32, shape=W_output.get_shape(), name="g_W_out")
+    #g_b_out = tf.placeholder(dtype=tf.float32, shape=b_output.get_shape(), name="g_b_out")
+    #gradients.append([g_W_out,g_b_out])
     #the gradient-parameter pairs for gradient computation/application
-    grad_var_pairs = zip([g_W_in,g_b_in,g_W_out,g_b_out],[W_input,b_input,W_output,b_output])
+    grad_var_pairs = zip(gradients,
+                         layer_weights)
 
     #the optimizer
     trainer = tf.train.GradientDescentOptimizer(learning_rate=learning_rate)
+    #trainer = tf.train.AdamOptimizer()
+    init_op = tf.global_variables_initializer()
+
     #initialize tensorflow
-    s = tf.InteractiveSession()
-    s.run(tf.global_variables_initializer())
+    with tf.Session() as s:
+        #s = tf.InteractiveSession()
+        s.run(init_op)
 
-    #break up validation/training data
-    validation_losses=[]
-    validation_indices = np.random.choice(num_obs,num_obs/5)
-    train_indices = np.ones(len(y), np.bool)
-    train_indices[validation_indices]=0
-    y_validation = y[validation_indices]
-    features_validation = features_second[validation_indices,:]
-    y_train = y[train_indices]
-    features_train  = features_second[train_indices,:]
-    num_train_obs = sum(train_indices)
-    print "training..."
-    num_iters = 10000
-    for i in range(num_iters):
-        if i%100==0:
-            print "     iteration: " + str(i)
-        #extract observation features for SGD
-        g_ind=np.random.choice(num_train_obs,1)[0]
-        obs_feat= features_second[train_indices,:][g_ind,:]
-        obs_y = y[train_indices][g_ind]
-        pi_i = pi[train_indices,:][g_ind,:]
-        mu_i = mu[train_indices,:][g_ind,:]
-        sd_i = sigma[train_indices,:][g_ind,:]
-        #reshape everything so treated as 2d
-        for v in [obs_y, obs_feat, pi_i, mu_i ,sd_i]:
-            v.shape = [1,len(v)]
+        #break up validation/training data
+        validation_losses=[]
+        validation_indices = np.random.choice(num_obs,num_obs/5)
+        train_indices = np.ones(len(y), np.bool)
+        train_indices[validation_indices]=0
+        y_validation = y[validation_indices]
+        features_validation = features[validation_indices,:]
+        y_train = y[train_indices]
+        features_train  = features[train_indices,:]
+        num_train_obs = sum(train_indices)
+        print "training..."
+        num_iters = 100
 
-        stoch_grad = ind_secondstage_loss_gradient_cont(obs_y,obs_feat,pi_i,mu_i,sd_i,outcome_layer,inputs,nn_gradients,s,p_mean,p_sd)
-        grad_dict={}
-        grad_index=0
-        for theta in [g_W_in,g_b_in,g_W_out,g_b_out]:
-            grad_dict[theta]=stoch_grad[grad_index]
-            grad_index+=1
-        s.run(trainer.apply_gradients(grad_var_pairs),feed_dict=grad_dict)
-        #the gradients of the output layer w.r.t. network parameters
-        if i%10==0:
-            loss=secondstage_loss_cont(y[validation_indices],outcome_layer,inputs,s,\
-                features_second[validation_indices,:], \
-                pi[validation_indices,:], \
-                mu[validation_indices,:], \
-                sigma[validation_indices,:], \
-                p_mean,p_sd,B=1000)
-            validation_losses.append(loss)
-            if len(validation_losses) > 5:
-                if np.mean(validation_losses[(len(validation_losses)-6):(len(validation_losses)-2)])< validation_losses[len(validation_losses)-1]:
-                    print "Exiting at iteration " + str(i) + " due to increase in validation error." 
-                    break
-    plt.plot(range(len(validation_losses)),validation_losses)
-    plt.show()
-    #recover parameters and return them
-    W_in_final = s.run(W_input)
-    B_in_final = s.run(b_input)
-    W_out_final = s.run(W_output)
-    B_out_final = s.run(b_output)
-    s.close()
-    return [W_in_final, B_in_final, W_out_final,B_out_final]
+
+
+
+        for i in range(num_iters):
+            if i%100==0:
+                print "     iteration: " + str(i)
+            #extract observation features for SGD
+            g_ind=np.random.choice(num_train_obs,1)[0]
+            obs_feat= features[train_indices,:][g_ind,:]
+            obs_y = y[train_indices][g_ind]
+            pi_i = pi[train_indices,:][g_ind,:]
+            mu_i = mu[train_indices,:][g_ind,:]
+            sd_i = sigma[train_indices,:][g_ind,:]
+            #reshape everything so treated as 2d
+            for v in [obs_y, obs_feat, pi_i, mu_i ,sd_i]:
+                v.shape = [1,len(v)]
+
+            stoch_grad = ind_secondstage_loss_gradient_cont(obs_y,obs_feat,pi_i,mu_i,sd_i,
+                                                            outcome_layer,inputs,nn_gradients,
+                                                            s,p_mean,p_sd) 
+            #print stoch_grad,len(stoch_grad)
+            #print "-----"
+            #print gradients,len(gradients)
+            grad_dict={}
+            grad_index=0
+            for theta in gradients:
+                grad_dict[theta]=stoch_grad[grad_index]
+                grad_index+=1
+            #print "^^^^^^"
+            #print grad_dict
+            #print "----"
+            #print grad_var_pairs
+            #print "********"
+            #print 
+            s.run(trainer.apply_gradients(grad_var_pairs),feed_dict=grad_dict)
+            #the gradients of the output layer w.r.t. network parameters
+            if i%10==0:
+                loss=secondstage_loss_cont(y[validation_indices],outcome_layer,inputs,s,\
+                    features[validation_indices,:], \
+                    pi[validation_indices,:], \
+                    mu[validation_indices,:], \
+                    sigma[validation_indices,:], \
+                    p_mean,p_sd,B=1000)
+                validation_losses.append(loss)
+                if len(validation_losses) > 5:
+                    if np.mean(validation_losses[(len(validation_losses)-6):(len(validation_losses)-2)])< validation_losses[len(validation_losses)-1]:
+                        print "Exiting at iteration " + str(i) + " due to increase in validation error." 
+                        break
+        plt.plot(range(len(validation_losses)),validation_losses)
+        plt.show()
+        #recover parameters and return them
+        final_weights={}
+        for l in layer_weights:
+            final_weights[l.name]=s.run(l)
+        #s.close()
+    return final_weights
 
 def cv_second_stage_cont(y,features_second,pi,mu,sigma,num_nodes,p_mean,p_sd,seed=None,p_index=0,folds=5,learning_rate=0.001):
     if seed!=None:
