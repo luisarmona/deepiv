@@ -4,6 +4,7 @@
 #heavily inspired by 
 #http://blog.otoro.net/2015/11/24/mixture-density-networks-with-tensorflow/
 import math
+import sys
 import numpy as np 
 import pandas as pd
 import tensorflow as tf
@@ -189,6 +190,30 @@ def ind_secondstage_loss_gradient_cont(outcome,features2,pi1,mu1,sigma1, \
         newgrad.append(multiplier*grad[g])
     return newgrad
 
+def secondstage_loss_gradient(outcome,features2,pi,mu,sigma, \
+        outcome_dnn,inputs,grad_fcn,session,p_mean,p_sd,p_index=0):
+    #correct one obs issue w/ array instead of mat
+    #print pi1.shape
+    num_obs = outcome.shape[0]
+    p1 = (mdn.sim_mdn(pi,mu,sigma,B=1) - p_mean)/p_sd
+    #print pi1.shape
+    p2 = (mdn.sim_mdn(pi,mu,sigma,B=1) - p_mean)/p_sd
+    tempfeat_1 = features2
+    tempfeat_2 = features2
+    tempfeat_1[:,p_index] = p1.flatten()
+    tempfeat_2[:,p_index] = p2.flatten()
+
+    #print"-----"
+    pred_outcome = session.run(outcome_dnn,feed_dict={inputs: tempfeat_1.astype(np.float32)})
+    d_outcome =  (outcome - pred_outcome)
+    newgrad = session.run(grad_fcn,feed_dict={inputs: tempfeat_2[[0],:].astype(np.float32)})
+    newgrad = [-2.*d_outcome[0] * g /num_obs for g in newgrad]
+    for i in xrange(1,num_obs):
+        tempgrad = session.run(grad_fcn,feed_dict={inputs: tempfeat_2[[i],:].astype(np.float32)})
+        tempgrad = [-2.*d_outcome[i] * g /num_obs for g in newgrad]
+        newgrad  = [g + temp_g for g,temp_g in zip(newgrad,tempgrad)]
+    return newgrad
+
 #estimate loss function (for validation training)
 #args: outcome is true outcome data,
 #outcome_dnn is the DNN trained to predict y, given inputs
@@ -261,7 +286,8 @@ def ind_secondstage_loss_gradient_discrete(outcome,features2, P,p_range,
 #num_nodes: the number of nodes in the hidden layer
 def train_second_stage_cont(y,features,pi,mu,sigma,deeplayer_nodes=[10],
                             p_mean=0.,p_sd=1.,seed=None,
-                            p_index=0,learning_rate=0.001):
+                            p_index=0,learning_rate=0.001,
+                            num_epochs= 10,num_batches=10):
     if seed!=None:
         np.random.seed(seed)  
     else:
@@ -350,55 +376,68 @@ def train_second_stage_cont(y,features,pi,mu,sigma,deeplayer_nodes=[10],
         num_train_obs = sum(train_indices)
         print "training..."
         num_iters = 100
+        pi_train = pi[train_indices,:]
+        mu_train = mu[train_indices,:]
+        sigma_train = mu[train_indices,:]
+        loss=secondstage_loss_cont(y[validation_indices],outcome_layer,inputs,s,\
+            features[validation_indices,:], \
+            pi[validation_indices,:], \
+            mu[validation_indices,:], \
+            sigma[validation_indices,:], \
+            p_mean,p_sd,B=1000)
+        validation_losses.append(loss)
+        for j in range(num_epochs):
+            batchrank= np.argsort(np.random.uniform(size=num_train_obs))
+            sys.stdout.write("\rCompleted Epoch: {e}/{eb}; loss={loss}".format(e=j,eb=num_epochs,loss=loss))
+            sys.stdout.flush()
+            for i in range(num_batches):
+                #print i
+                batch = (batchrank >= i*num_train_obs/num_batches) & (batchrank <(i+1)*num_train_obs/num_batches)
+                #extract observation features for SGD
+                #g_ind=np.random.choice(num_train_obs,1)[0]
+                #feature_batch= features[train_indices,:][g_ind,:]
+                #y_batch = y[train_indices][g_ind]
+                #pi_batch = pi[train_indices,:][g_ind,:]
+                #mu_batch = mu[train_indices,:][g_ind,:]
+                #sd_batch = sigma[train_indices,:][g_ind,:]
+                #reshape everything so treated as 2d
+                #for v in [obs_y, obs_feat, pi_batch, mu_batch ,sd_batch]:
+                #    v.shape = [1,len(v)]
 
-
-
-
-        for i in range(num_iters):
-            if i%100==0:
-                print "     iteration: " + str(i)
-            #extract observation features for SGD
-            g_ind=np.random.choice(num_train_obs,1)[0]
-            obs_feat= features[train_indices,:][g_ind,:]
-            obs_y = y[train_indices][g_ind]
-            pi_i = pi[train_indices,:][g_ind,:]
-            mu_i = mu[train_indices,:][g_ind,:]
-            sd_i = sigma[train_indices,:][g_ind,:]
-            #reshape everything so treated as 2d
-            for v in [obs_y, obs_feat, pi_i, mu_i ,sd_i]:
-                v.shape = [1,len(v)]
-
-            stoch_grad = ind_secondstage_loss_gradient_cont(obs_y,obs_feat,pi_i,mu_i,sd_i,
-                                                            outcome_layer,inputs,nn_gradients,
-                                                            s,p_mean,p_sd) 
-            #print stoch_grad,len(stoch_grad)
-            #print "-----"
-            #print gradients,len(gradients)
-            grad_dict={}
-            grad_index=0
-            for theta in gradients:
-                grad_dict[theta]=stoch_grad[grad_index]
-                grad_index+=1
-            #print "^^^^^^"
-            #print grad_dict
-            #print "----"
-            #print grad_var_pairs
-            #print "********"
-            #print 
-            s.run(trainer.apply_gradients(grad_var_pairs),feed_dict=grad_dict)
-            #the gradients of the output layer w.r.t. network parameters
-            if i%10==0:
-                loss=secondstage_loss_cont(y[validation_indices],outcome_layer,inputs,s,\
-                    features[validation_indices,:], \
-                    pi[validation_indices,:], \
-                    mu[validation_indices,:], \
-                    sigma[validation_indices,:], \
-                    p_mean,p_sd,B=1000)
-                validation_losses.append(loss)
-                if len(validation_losses) > 5:
-                    if np.mean(validation_losses[(len(validation_losses)-6):(len(validation_losses)-2)])< validation_losses[len(validation_losses)-1]:
-                        print "Exiting at iteration " + str(i) + " due to increase in validation error." 
-                        break
+                stoch_grad = secondstage_loss_gradient(y_train[batch,:],features_train[batch,:],
+                                                                pi_train[batch,:],mu_train[batch,:],sigma_train[batch,:],
+                                                                outcome_layer,inputs,nn_gradients,
+                                                                s,p_mean,p_sd) 
+                #print stoch_grad,len(stoch_grad)
+                #print "-----"
+                #print gradients,len(gradients)
+                grad_dict=dict(zip(gradients,stoch_grad))
+                #grad_index=0
+                #for theta in gradients:
+                #    grad_dict[theta]=stoch_grad[grad_index]
+                #    grad_index+=1
+                #print "^^^^^^"
+                #print grad_dict
+                #print "----"
+                #print grad_var_pairs
+                #print "********"
+                #print 
+                s.run(trainer.apply_gradients(grad_var_pairs),feed_dict=grad_dict)
+                #the gradients of the output layer w.r.t. network parameters
+            #if i%10==0:
+            loss=secondstage_loss_cont(y[validation_indices],outcome_layer,inputs,s,\
+                features[validation_indices,:], \
+                pi[validation_indices,:], \
+                mu[validation_indices,:], \
+                sigma[validation_indices,:], \
+                p_mean,p_sd,B=1000)
+            validation_losses.append(loss)
+            if len(validation_losses) >= 2:
+                if validation_losses[len(validation_losses)-2]< validation_losses[len(validation_losses)-1]:
+                    print "\nExiting at iteration " + str(j) + " due to increase in validation error." 
+                    break
+        if j==num_epochs-1:
+            print "\nCompleted {} Epochs".format(num_epochs)
         plt.plot(range(len(validation_losses)),validation_losses)
         plt.show()
         #recover parameters and return them

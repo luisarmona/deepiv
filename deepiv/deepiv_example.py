@@ -3,7 +3,7 @@ import math
 import mdn
 import numpy as np
 import matplotlib.pyplot as plt
-N=10000
+N=5000
 np.random.seed(9)
 t = np.random.rand(N)*10.
 s = np.random.randint(1,8,size=N)
@@ -37,7 +37,8 @@ outcome = y
 covars_ss = np.concatenate([p,t,s],axis=1)
 outcome_weights = deepiv.train_second_stage_cont(y,covars_ss,
 							mixprobs,mixmeans,mixsds,
-							deeplayer_nodes=[10,10],p_index=0)
+							deeplayer_nodes=[32,8],p_index=0,
+							learning_rate=1.,num_epochs=100)
 
 for l in outcome_weights:
 	print l,outcome_weights[l].shape
