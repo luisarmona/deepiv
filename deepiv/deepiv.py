@@ -10,7 +10,7 @@ import pandas as pd
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import mdn #library for mixture density network estimation I made
-
+import tensorflow as tf
 
 #given set of features, predict our DNN conditional distribution for the first stage.
 #useful for recovering parameters on new data
@@ -27,17 +27,29 @@ def predict_1stStage_cond_dist(features,W_features,B_features,W_hidden,B_hidden)
 
 
 
+
+def predict_eta(weight_dict,features):
+    '''
+    given a weight dict produced from training a deep iv network, predict the nodes in the second to last layer
+    '''
+    num_layers = max([ int(l[l.rfind('_')+1:l.rfind(':')]) for l in weight_dict.keys() if l.find('output')==-1])
+    intermed = features
+    for l in range(num_layers):
+        intermed = np.tanh(np.dot(intermed,weight_dict['weights_' + str(l) + ':0']) + weight_dict['bias_' + str(l) + ':0'])
+    return intermed
+
 #given estimated network parameters
 #sample from the second stage network up to the final hidden layer (the "etas" in the paper)
 #to get instruments and treatments given network parameters.
 #p_index denotes location in features_2 of the policy variable
 # B indicates the number of times we sample to calculate the expectation.
+
 def predict_etas_cont(pi,mu,sigma, \
-                      features_2,W_features_2,B_features_2,p_mean,p_sd, B=1000,p_index=0):
+                      features_2,weight_dict,p_mean,p_sd, B=1000,p_index=0):
     num_obs = features_2.shape[0]
-    num_etas = W_features_2.shape[1]
     #calculate predicted etas given observed p
-    treatments =  np.tanh(np.dot(features_2,W_features_2) + B_features_2)
+    treatments = predict_eta(weight_dict,features_2)
+    num_etas = treatments.shape[1]
     #calculate predicted etas given 1st stage distribution
     instruments = np.zeros(shape=[num_obs,num_etas,B])
     temp_features_2 = features_2
@@ -47,7 +59,7 @@ def predict_etas_cont(pi,mu,sigma, \
         p_samp= np.random.normal(loc=mu[np.arange(num_obs),distchoice],scale=sigma[np.arange(num_obs),distchoice])
         p_samp = (p_samp - p_mean)/p_sd
         temp_features_2[:,p_index] = p_samp 
-        etas = np.tanh(np.dot(temp_features_2,W_features_2) + B_features_2)
+        etas = predict_eta(weight_dict,temp_features_2)
         instruments[:,:,j] = etas
 
     instruments = np.mean(instruments,axis=2)
@@ -88,11 +100,11 @@ def estimate_iv_coefs(y,treatment,instruments):
     H_hatxH_hat_inv =  np.linalg.inv(np.dot(H_hat.transpose(),H_hat)).astype(np.float32)
     beta = np.dot( H_hatxH_inv, np.dot(H_hat.transpose(),y) ).astype(np.float32)
     #do the diagonal residual matrix factorization obs by obs
-    res = (np.dot(H,beta) - y)**2
+    res_sq = (np.dot(H,beta) - y)**2
     D_res = np.zeros([H.shape[1],H.shape[1]])
     for i in range(num_validation_obs):
         #ind_transpose = res[i] * np.dot(H_hat[i,:].transpose(),H_hat[i,:])
-        D_res = D_res + res[i] * np.dot(H_hat[i,:][:,np.newaxis],H_hat[i,:][:,np.newaxis].transpose() )
+        D_res = D_res + res_sq[i] * np.dot(H_hat[[i],:].transpose(),H_hat[[i],:] )
     #D_res = D_res/num_validation_obs
     #ind_transpose = res[i] * np.dot(H_hat[i,:][].transpose(),H_hat[i,:])
     #print ind_transpose.shape
@@ -192,6 +204,18 @@ def ind_secondstage_loss_gradient_cont(outcome,features2,pi1,mu1,sigma1, \
 
 def secondstage_loss_gradient(outcome,features2,pi,mu,sigma, \
         outcome_dnn,inputs,grad_fcn,session,p_mean,p_sd,p_index=0):
+    '''
+    calculates the gradient for a batch of data as reccomended in hartford et al
+    params:
+        outcome: the outcome (as a 1d vector)
+        features2: the covariates/controls + endogenous variable
+        p_index: the column location of the endogenous variable in features2
+        pi,mu,sigma: the 1st stage MDN parameters
+        outcome_dnn: the final layer of the DNN
+        inputs: the input layer of the DNN
+        session: the current tf session
+        p_mean,p_sd: normalizations for the endog variable if necessary
+    '''
     #correct one obs issue w/ array instead of mat
     #print pi1.shape
     num_obs = outcome.shape[0]
@@ -305,7 +329,7 @@ def train_second_stage_cont(y,features,pi,mu,sigma,deeplayer_nodes=[10],
     #use canonical tanh function for intermed, simple linear combo for final layer
     #(note it will be further processed)
 
-    deep_layers = []
+    layers = [inputs]
     layer_weights = []
     prev_dim = num_inputs
     prev_layer = inputs
@@ -318,7 +342,7 @@ def train_second_stage_cont(y,features,pi,mu,sigma,deeplayer_nodes=[10],
                 minval=-.1,maxval=.1,dtype=tf.float32,seed=seed),
                 name="bias_{}".format(i))
         inter_layer = tf.nn.tanh(tf.matmul(prev_layer, W_layer) + b_layer)
-        deep_layers.append(inter_layer)
+        layers.append(inter_layer)
         layer_weights.append(W_layer)
         layer_weights.append(b_layer)
         prev_dim = l
@@ -334,7 +358,7 @@ def train_second_stage_cont(y,features,pi,mu,sigma,deeplayer_nodes=[10],
     outcome_layer = tf.matmul(prev_layer,W_output) + b_output
     layer_weights.append(W_output)
     layer_weights.append(b_output)
-
+    layers.append(outcome_layer)
     #the gradients of the output layer w.r.t. network parameters
     #delisted_weights = 
     nn_gradients = tf.gradients(outcome_layer,layer_weights) #the gradients of the DNN w.r.t. parameters
@@ -445,7 +469,7 @@ def train_second_stage_cont(y,features,pi,mu,sigma,deeplayer_nodes=[10],
         for l in layer_weights:
             final_weights[l.name]=s.run(l)
         #s.close()
-    return final_weights
+    return final_weights,layers
 
 def cv_second_stage_cont(y,features_second,pi,mu,sigma,num_nodes,p_mean,p_sd,seed=None,p_index=0,folds=5,learning_rate=0.001):
     if seed!=None:
